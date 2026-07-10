@@ -1,0 +1,5 @@
+dist/
+*.user
+*.suo
+*.pdb
+*.shortcut-state
