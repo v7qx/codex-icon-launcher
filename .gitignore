@@ -1,5 +1,7 @@
 dist/
+/docs/
 *.user
 *.suo
 *.pdb
 *.shortcut-state
+CodexLauncher.appid

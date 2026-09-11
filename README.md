@@ -1,46 +1,33 @@
 # Codex Launcher for Windows
 
-A tiny open-source launcher for the packaged ChatGPT/Codex Windows app.
+A tiny launcher for the packaged ChatGPT/Codex Windows app, with a custom shortcut icon.
 
-<img src="assets/Codex.png" alt="Codex Launcher icon" width="128" />
+<img src="assets/Codex.svg" alt="Codex Launcher icon" width="128" />
 
 ## Features
 
-- Activates `OpenAI.Codex_2p2nqsd0c76g0!App` through Windows' `IApplicationActivationManager` API.
-- Avoids launching the packaged app through `explorer.exe shell:AppsFolder`.
-- Maintains `Codex.lnk` shortcuts on the desktop and in the Start menu only when their target or icon changes.
-- Prefers `Codex.ico` beside the executable and falls back to the icon embedded in `Codex.exe`.
-- Exits immediately after activation and does not remain in the background.
-
-## Project layout
-
-```text
-codex-launcher/
-├── src/CodexLauncher.cs
-├── assets/
-│   ├── Codex.ico
-│   ├── Codex.png
-│   ├── Codex.svg
-│   └── Codex-original.svg
-├── build.cmd
-├── LICENSE
-└── README.md
-```
+- Automatically detects the installed app and opens it.
+- Applies the custom taskbar icon to the app's current windows after launch.
+- Creates desktop or Start menu shortcuts on request, with a custom icon and matching taskbar identity.
+- Embeds the icon in a single executable.
 
 ## Build
 
-Run `build.cmd`. The compiled launcher is written to `dist\Codex.exe`.
+Run `build.cmd` to generate `dist\Codex.exe`.
 
-The build uses the .NET Framework C# compiler included with Windows and requires no third-party packages.
+## Use
 
-## Identifiers
+1. Place `Codex.exe` in a permanent folder.
+2. Run it to open the app.
+3. Optionally create a shortcut using one of the commands below. You can pin it to the taskbar.
 
-- `45BA127D-10A8-46EA-8AB7-56EA9078943C` is the system-wide COM class identifier for `ApplicationActivationManager`.
-- `2E941141-7F97-4756-BA1D-9DECDE894A3D` identifies the `IApplicationActivationManager` interface.
-- `OpenAI.Codex_2p2nqsd0c76g0!App` is the AppUserModelID of the ChatGPT/Codex package targeted by this launcher.
+```powershell
+.\Codex.exe --create-shortcut desktop
+.\Codex.exe --create-shortcut start-menu
+```
+
+To customize the icon, replace `assets/Codex.ico` and run `build.cmd` again. `assets/Codex.svg` is provided as editable artwork; after editing it, export an ICO to replace `assets/Codex.ico`. The build uses only the ICO file.
 
 ## License
 
-MIT
-
-The icon assets are derived from the MIT-licensed [Lobe Icons](https://github.com/lobehub/lobe-icons) project. Codex, ChatGPT, OpenAI, and their respective logos are trademarks of OpenAI. This project is unofficial and is not affiliated with or endorsed by OpenAI.
+Icon assets are derived from [Lobe Icons](https://github.com/lobehub/lobe-icons), licensed under MIT. Codex, ChatGPT, OpenAI, and their logos are trademarks of OpenAI. This is an unofficial community project.
