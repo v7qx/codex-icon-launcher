@@ -4,6 +4,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Collections.Generic;
 
 [StructLayout(LayoutKind.Sequential)]
 internal struct PropertyKey {
@@ -163,6 +164,9 @@ internal static class Program {
         bool createShortcut = args.Length == 2 && args[0] == "--create-shortcut" && (args[1] == "desktop" || args[1] == "start-menu");
         bool diagnose = args.Length == 1 && args[0] == "--diagnose";
         if (args.Length != 0 && !createShortcut && !diagnose) return 2;
+        LauncherLog.Write("INFO", "start", "exe=" + Assembly.GetExecutingAssembly().Location +
+            " build=" + typeof(Program).Module.ModuleVersionId + " os=" + Environment.OSVersion +
+            " x64=" + Environment.Is64BitProcess + " args=" + String.Join(" ", args));
         try {
             if (diagnose) return Diagnose();
             string executablePath = Assembly.GetExecutingAssembly().Location;
@@ -170,17 +174,20 @@ internal static class Program {
             return Run(executablePath);
         }
         catch (Exception error) {
+            LauncherLog.Write("ERROR", "fatal", error.ToString());
             LogShortcutError(error);
             if (!createShortcut && !diagnose)
                 MessageBox(IntPtr.Zero, error.Message + "\n\nDetails: " + Path.Combine(DataDirectory, "shortcut-errors.log"), "Codex Launcher", 0x10);
             return 1;
         }
+        finally { LauncherLog.Write("INFO", "exit", "Launcher finished"); }
     }
 
     private static int Run(string executablePath) {
         string installDirectory = Path.GetDirectoryName(executablePath);
         // Resolve the registered activation identity independently of taskbar grouping.
         string appId = AppDiscovery.Resolve(installDirectory);
+        LauncherLog.Write("INFO", "discovery", "activationId=" + appId + " taskbarId=" + WindowTaskbar.TaskbarAppId(appId));
 
         int result = RunBounded(() => Activate(appId), 20000, "Application activation");
         if (result < 0) {
@@ -190,19 +197,31 @@ internal static class Program {
             result = RunBounded(() => Activate(appId), 20000, "Application activation retry");
         }
         if (result < 0) Marshal.ThrowExceptionForHR(result);
+        // Independent of taskbar success: cosmetic failures must not block activation.
+        try { RunBounded(() => TrayIconOverride.Apply(appId, executablePath), 6000, "Tray icon"); }
+        catch (Exception error) { LauncherLog.Write("WARN", "tray.failed", error.ToString()); }
         // The visible window belongs to the packaged app, not this executable.
         // Apply taskbar metadata independently of optional shortcut creation.
         try {
             RunBounded(() => WindowTaskbar.Apply(appId, executablePath),
                 6000, "Taskbar icon");
         }
-        catch (Exception error) { LogShortcutError(error); }
+        catch (Exception error) {
+            LogShortcutError(error);
+            LauncherLog.Write("ERROR", "taskbar.failed", error.ToString());
+            MessageBox(IntPtr.Zero, "应用已启动，但启动器未能确认任务栏图标属性写入成功。\n\n" +
+                error.Message + "\n\n详细日志：" + LauncherLog.PathName,
+                "Codex Launcher — 图标设置失败", 0x30);
+            return 3;
+        }
         return 0;
     }
 
     // A stuck Shell/COM call must not keep this launcher alive indefinitely.
     // COM objects are created, used and released on the same STA worker.
     internal static int RunBounded(Func<int> operation, int milliseconds, string stage) {
+        LauncherLog.Write("INFO", "stage.begin", stage + " timeoutMs=" + milliseconds);
+        System.Diagnostics.Stopwatch elapsed = System.Diagnostics.Stopwatch.StartNew();
         int result = 0;
         Exception failure = null;
         Thread worker = new Thread(() => {
@@ -212,9 +231,13 @@ internal static class Program {
         worker.IsBackground = true;
         worker.SetApartmentState(ApartmentState.STA);
         worker.Start();
-        if (!worker.Join(milliseconds))
+        if (!worker.Join(milliseconds)) {
+            LauncherLog.Write("ERROR", "stage.timeout", stage + " elapsedMs=" + elapsed.ElapsedMilliseconds);
             throw new TimeoutException(stage + " did not finish within " + milliseconds / 1000 +
                 " seconds. Windows may still be processing the request. Try opening the app from Windows Search.");
+        }
+        LauncherLog.Write(failure == null ? "INFO" : "ERROR", "stage.end", stage +
+            " elapsedMs=" + elapsed.ElapsedMilliseconds + " result=" + result + " error=" + failure);
         if (failure != null) throw new InvalidOperationException(stage + " failed: " + failure.Message, failure);
         return result;
     }
@@ -227,9 +250,12 @@ internal static class Program {
         // so activation arguments survive after this executable exits.
         CoCreateInstance(ref classId, IntPtr.Zero, 4 /* CLSCTX_LOCAL_SERVER */, ref interfaceId, out manager);
         try {
-            CoAllowSetForegroundWindow(manager, IntPtr.Zero);
+            int foreground = CoAllowSetForegroundWindow(manager, IntPtr.Zero);
             uint processId;
-            return manager.ActivateApplication(appId, null, ActivateOptions.NoErrorUI, out processId);
+            int result = manager.ActivateApplication(appId, null, ActivateOptions.NoErrorUI, out processId);
+            LauncherLog.Write(result < 0 ? "ERROR" : "INFO", "activation", "appId=" + appId +
+                " pid=" + processId + " hr=0x" + result.ToString("X8") + " foregroundHr=0x" + foreground.ToString("X8"));
+            return result;
         }
         finally { Marshal.FinalReleaseComObject(manager); }
     }
@@ -281,6 +307,9 @@ internal static class Program {
             string selected = AppDiscovery.SelectApplication(ids, family, requested);
             report.AppendLine("Selected AppUserModelID: " + selected);
             report.AppendLine("Taskbar AppUserModelID: " + WindowTaskbar.TaskbarAppId(selected));
+            report.AppendLine("Window snapshot (read-only):");
+            report.AppendLine(WindowTaskbar.Inspect(selected, executablePath));
+            report.AppendLine(TrayIconOverride.Inspect(selected));
         }
         catch (Exception error) { report.AppendLine("Discovery ERROR: " + error.Message); result = 1; }
         foreach (string path in ShortcutPaths()) {
@@ -308,6 +337,47 @@ internal static class Program {
     }
 }
 
+internal static class LauncherLog {
+    private static readonly object Gate = new object();
+    private static readonly System.Diagnostics.Stopwatch Clock = System.Diagnostics.Stopwatch.StartNew();
+    internal static readonly string PathName = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexLauncher", "logs",
+        "launch-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fff") + "-" + Guid.NewGuid().ToString("N") + ".log");
+    private static bool initialized, warned;
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int MessageBox(IntPtr window, string text, string caption, uint type);
+
+    internal static void Write(string level, string stage, string detail) {
+        lock (Gate) {
+            try {
+                if (!initialized) {
+                    string directory = Path.GetDirectoryName(PathName);
+                    Directory.CreateDirectory(directory);
+                    string[] files = Directory.GetFiles(directory, "launch-*.log");
+                    Array.Sort(files, StringComparer.Ordinal);
+                    // Each run owns a separate file; never rotate another active run's file.
+                    for (int i = 0; i < files.Length - 19; i++) {
+                        try {
+                            if (File.GetLastWriteTimeUtc(files[i]) < DateTime.UtcNow.AddMinutes(-5)) File.Delete(files[i]);
+                        }
+                        catch { /* Retention failure must not discard the current run. */ }
+                    }
+                    initialized = true;
+                }
+                File.AppendAllText(PathName, DateTime.UtcNow.ToString("o") + " +" + Clock.ElapsedMilliseconds +
+                    "ms [" + level + "] " + stage + " " + detail.Replace("\r", "\\r").Replace("\n", "\\n") + Environment.NewLine, Encoding.UTF8);
+            }
+            catch (Exception error) {
+                if (!warned) {
+                    warned = true;
+                    MessageBox(IntPtr.Zero, "无法写入启动诊断日志：" + PathName + "\n" + error.Message,
+                        "Codex Launcher — 日志不可用", 0x30);
+                }
+            }
+        }
+    }
+}
+
 internal static class WindowTaskbar {
     internal static string TaskbarAppId(string activationId) {
         using (System.Security.Cryptography.SHA256 hash = System.Security.Cryptography.SHA256.Create())
@@ -321,7 +391,7 @@ internal static class WindowTaskbar {
     private static extern bool EnumResourceNames(IntPtr module, IntPtr type, EnumResourceCallback callback, IntPtr parameter);
     [DllImport("kernel32.dll")]
     private static extern bool FreeLibrary(IntPtr module);
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError = true)]
     private static extern bool EnumWindows(EnumWindowCallback callback, IntPtr parameter);
     [DllImport("user32.dll")]
     private static extern bool IsWindowVisible(IntPtr window);
@@ -329,7 +399,7 @@ internal static class WindowTaskbar {
     private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
     [DllImport("user32.dll")]
     private static extern IntPtr GetWindow(IntPtr window, uint command);
-    [DllImport("kernel32.dll")]
+    [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr OpenProcess(uint access, bool inherit, uint processId);
     [DllImport("kernel32.dll")]
     private static extern bool CloseHandle(IntPtr handle);
@@ -358,43 +428,131 @@ internal static class WindowTaskbar {
         finally { FreeLibrary(module); }
     }
 
-    private static string ProcessAppId(uint processId) {
+    internal static string ProcessAppId(uint processId) {
         IntPtr process = OpenProcess(0x1000 /* QUERY_LIMITED_INFORMATION */, false, processId);
-        if (process == IntPtr.Zero) return null;
+        if (process == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "OpenProcess pid=" + processId);
         try {
             uint length = 0;
-            if (GetApplicationUserModelId(process, ref length, null) != 122 || length == 0) return null;
+            int result = GetApplicationUserModelId(process, ref length, null);
+            if (result == 15703) return null; // APPMODEL_ERROR_NO_APPLICATION
+            if (result != 122 || length == 0) throw new System.ComponentModel.Win32Exception(result, "GetApplicationUserModelId size pid=" + processId);
             StringBuilder text = new StringBuilder(checked((int)length));
-            return GetApplicationUserModelId(process, ref length, text) == 0 ? text.ToString() : null;
+            result = GetApplicationUserModelId(process, ref length, text);
+            if (result != 0) throw new System.ComponentModel.Win32Exception(result, "GetApplicationUserModelId pid=" + processId);
+            return text.ToString();
         }
         finally { CloseHandle(process); }
     }
 
     internal static int Apply(string appId, string executable) {
         string resource = IconResource(executable);
+        string identity = TaskbarAppId(appId);
+        LauncherLog.Write("INFO", "taskbar.begin", "icon=" + resource +
+            " windowWaitMs=4000; apply immediately when found; property verification only");
         System.Diagnostics.Stopwatch timer = System.Diagnostics.Stopwatch.StartNew();
+        Dictionary<uint, string> processStates = new Dictionary<uint, string>();
         do {
             int count = 0;
             Exception failure = null;
-            EnumWindows((window, parameter) => {
-                // Only visible, unowned windows of the exact registered application.
-                // Activation can return a transient PID when a single-instance app
-                // forwards the launch, so discover the actual window owner instead.
+            bool enumerated = EnumWindows((window, parameter) => {
+                // Activation can return a transient PID. Match the actual window owner.
                 if (!IsWindowVisible(window) || GetWindow(window, 4 /* GW_OWNER */) != IntPtr.Zero) return true;
                 uint processId;
                 GetWindowThreadProcessId(window, out processId);
-                try {
-                    if (!String.Equals(ProcessAppId(processId), appId, StringComparison.Ordinal)) return true;
-                    SetWindowProperties(window, TaskbarAppId(appId), executable, resource); count++;
+                string processIdentity;
+                try { processIdentity = ProcessAppId(processId); }
+                catch (Exception error) {
+                    RecordProcess(processStates, processId, "query-error=" + error.Message);
+                    return true;
                 }
-                catch (Exception error) { failure = error; }
+                RecordProcess(processStates, processId, processIdentity ?? "(no packaged application identity)");
+                if (!String.Equals(processIdentity, appId, StringComparison.Ordinal)) return true;
+                string context = "hwnd=0x" + window.ToInt64().ToString("X") + " pid=" + processId;
+                LauncherLog.Write("INFO", "window.discovered", context + " elapsedMs=" + timer.ElapsedMilliseconds);
+                try {
+                    string mismatch = PropertyMismatch(window, identity, executable, resource);
+                    if (mismatch != null) {
+                        LauncherLog.Write("INFO", "properties.before", context + " " + mismatch);
+                        SetWindowProperties(window, identity, executable, resource);
+                        string remaining = PropertyMismatch(window, identity, executable, resource);
+                        if (remaining != null) throw new IOException(remaining);
+                        LauncherLog.Write("INFO", "properties.applied", context + " verified after COM reopen");
+                    }
+                    else LauncherLog.Write("INFO", "properties.already-match", context);
+                    count++;
+                }
+                catch (Exception error) {
+                    failure = error;
+                    LauncherLog.Write("ERROR", "properties.failed", context + " " + error);
+                }
                 return true;
             }, IntPtr.Zero);
+            if (!enumerated) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "EnumWindows failed");
             if (failure != null) throw failure;
-            if (count > 0) return count;
+            if (count > 0) {
+                LauncherLog.Write("INFO", "taskbar.properties-verified", "windows=" + count +
+                    " elapsedMs=" + timer.ElapsedMilliseconds + "; visualStatus=UNVERIFIED; no further monitoring or rewriting");
+                return count;
+            }
+            if (timer.ElapsedMilliseconds >= 4000)
+                throw new TimeoutException("No visible window for " + appId + "; activation succeeded but taskbar properties could not be applied within 4 seconds.");
             Thread.Sleep(100);
-        } while (timer.ElapsedMilliseconds < 4000);
-        throw new TimeoutException("No visible window for " + appId + "; application activation succeeded but taskbar metadata was not applied.");
+        } while (true);
+    }
+    private static void RecordProcess(Dictionary<uint, string> states, uint pid, string state) {
+        string previous;
+        if (!states.TryGetValue(pid, out previous) || previous != state) {
+            states[pid] = state;
+            LauncherLog.Write("INFO", "process.identity", "pid=" + pid + " " + state);
+        }
+    }
+
+    internal static string Inspect(string appId, string executable) {
+        StringBuilder report = new StringBuilder();
+        string resource = IconResource(executable);
+        int matches = 0;
+        bool enumerated = EnumWindows((window, parameter) => {
+            if (!IsWindowVisible(window) || GetWindow(window, 4) != IntPtr.Zero) return true;
+            uint pid;
+            GetWindowThreadProcessId(window, out pid);
+            try {
+                if (ProcessAppId(pid) != appId) return true;
+                matches++;
+                string mismatch = PropertyMismatch(window, TaskbarAppId(appId), executable, resource);
+                report.AppendLine("hwnd=0x" + window.ToInt64().ToString("X") + " pid=" + pid + " " +
+                    (mismatch ?? "properties match; visualStatus=UNVERIFIED"));
+            }
+            catch (Exception error) { report.AppendLine("pid=" + pid + " inspection error: " + error.Message); }
+            return true;
+        }, IntPtr.Zero);
+        if (!enumerated) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "EnumWindows failed");
+        report.AppendLine("Matching visible unowned windows: " + matches);
+        return report.ToString();
+    }
+
+    internal static string PropertyMismatch(IntPtr window, string appId, string executable, string iconResource) {
+        Guid iid = typeof(IPropertyStore).GUID;
+        IPropertyStore store;
+        SHGetPropertyStoreForWindow(window, ref iid, out store);
+        try {
+            string[] expected = { "\"" + executable + "\"", iconResource, "Codex", appId };
+            StringBuilder differences = new StringBuilder();
+            for (uint property = 2; property <= 5; property++) {
+                PropertyKey key = new PropertyKey {
+                    FormatId = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"), PropertyId = property
+                };
+                PropVariant value = new PropVariant();
+                try {
+                    store.GetValue(ref key, out value);
+                    string actual = value.Type == 31 ? Marshal.PtrToStringUni(value.Value) : "(type=" + value.Type + ")";
+                    if (value.Type != 31 || actual != expected[property - 2])
+                        differences.Append("property=" + property + " actual=[" + actual + "] expected=[" + expected[property - 2] + "]; ");
+                }
+                finally { PropVariantClear(ref value); }
+            }
+            return differences.Length == 0 ? null : differences.ToString();
+        }
+        finally { Marshal.FinalReleaseComObject(store); }
     }
 
     internal static void SetWindowProperties(IntPtr window, string appId, string executable, string iconResource) {
