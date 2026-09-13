@@ -469,6 +469,7 @@ internal static class WindowTaskbar {
                 if (!String.Equals(processIdentity, appId, StringComparison.Ordinal)) return true;
                 string context = "hwnd=0x" + window.ToInt64().ToString("X") + " pid=" + processId;
                 LauncherLog.Write("INFO", "window.discovered", context + " elapsedMs=" + timer.ElapsedMilliseconds);
+                WindowBranding.ApplyTitle(window);
                 try {
                     string mismatch = PropertyMismatch(window, identity, executable, resource);
                     if (mismatch != null) {
@@ -521,6 +522,7 @@ internal static class WindowTaskbar {
                 string mismatch = PropertyMismatch(window, TaskbarAppId(appId), executable, resource);
                 report.AppendLine("hwnd=0x" + window.ToInt64().ToString("X") + " pid=" + pid + " " +
                     (mismatch ?? "properties match; visualStatus=UNVERIFIED"));
+                report.AppendLine(WindowBranding.Inspect(window));
             }
             catch (Exception error) { report.AppendLine("pid=" + pid + " inspection error: " + error.Message); }
             return true;

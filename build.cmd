@@ -15,7 +15,7 @@ if not exist "dist" (
   echo ERROR: Could not create the dist folder. Check write permissions for this folder.
   exit /b 1
 )
-"%CSC%" /nologo /target:winexe /optimize+ /reference:Microsoft.CSharp.dll /win32icon:assets\Codex.ico /out:dist\Codex.exe src\CodexLauncher.cs src\AppDiscovery.cs src\TrayIconOverride.cs
+"%CSC%" /nologo /target:winexe /optimize+ /reference:Microsoft.CSharp.dll /win32icon:assets\Codex.ico /out:dist\Codex.exe src\CodexLauncher.cs src\AppDiscovery.cs src\TrayIconOverride.cs src\WindowBranding.cs
 if errorlevel 1 (
   echo ERROR: Build failed. See the compiler messages above.
   exit /b 1

@@ -98,13 +98,14 @@ internal static class TrayIconOverride {
                     if (Shell_NotifyIconGetRect(ref id, out rect) >= 0) {
                         NotifyData data = new NotifyData {
                             Size = (uint)Marshal.SizeOf(typeof(NotifyData)), Window = host,
-                            Guid = ProductionGuid, Flags = 0x22 /* NIF_GUID | NIF_ICON */,
+                            Guid = ProductionGuid, Flags = 0x26 /* NIF_GUID | NIF_ICON | NIF_TIP */,
+                            Tip = "Codex",
                             Icon = large != IntPtr.Zero ? large : small
                         };
                         if (Shell_NotifyIcon(1 /* NIM_MODIFY */, ref data)) {
                             LauncherLog.Write("INFO", "tray.applied", "pid=" + pid +
                                 " elapsedMs=" + clock.ElapsedMilliseconds +
-                                "; one-shot; visualStatus=UNVERIFIED");
+                                "; tooltip=Codex; one-shot; visualStatus=UNVERIFIED");
                             return 1;
                         }
                     }
